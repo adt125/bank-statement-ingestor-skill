@@ -5,7 +5,7 @@ description: Use this skill whenever a user wants to ingest, parse, or import ba
 
 # Bank Statement Ingestor Skill
 
-Parses Indian bank statements (PDF/CSV) → strips PII → normalizes via LLM → deduplicates → inserts into any expense DB.
+Parses Indian bank statements (PDF/CSV) → strips PII → produces a validation CSV for user review → normalizes via LLM/agent → deduplicates → writes a final CSV with category tags (no DB insertion).
 
 ## Pipeline Overview
 
@@ -19,13 +19,16 @@ Parses Indian bank statements (PDF/CSV) → strips PII → normalizes via LLM �
   2. pii_filter   — mask account nos, UPI IDs, PAN, Aadhaar, phone, names
        │
        ▼
-  3. normalize    — LLM → merchant name, category, tags, confidence
+  3. validate     — produce validation CSV for user to inspect/edit
        │
        ▼
-  4. deduplicate  — SHA256 hash check against existing DB
+  4. normalize    — LLM/agent → merchant name, category, tags, confidence
        │
        ▼
-  [ Expense DB ]
+  5. deduplicate  — in-memory hash-based deduplication
+       │
+       ▼
+  Final CSV (no DB)
 ```
 
 ## Supported Banks
@@ -40,14 +43,13 @@ pip install pdfplumber pandas openpyxl anthropic python-dotenv
 
 ### Run the full pipeline (CLI)
 ```bash
-# Dry run — parse only, no DB insert
-python scripts/pipeline.py statement.pdf --dry-run
+# Produce validation CSV and pause for review (agent/human in the loop)
+AGENT_NORMALIZATION=true python scripts/pipeline.py statement.pdf
 
-# Full run against SQLite
-python scripts/pipeline.py hdfc_march.pdf icici_march.csv --db expenses.db
+# Full run that auto-normalizes (no pause)
+python scripts/pipeline.py hdfc_march.pdf icici_march.csv
 
-
-# CLI wrapper (keeps a convenient entrypoint but does NOT run a web server)
+# CLI wrapper (convenience entrypoint)
 python scripts/api.py hdfc_march.pdf
 ```
 
@@ -55,10 +57,13 @@ python scripts/api.py hdfc_march.pdf
 ```python
 from scripts.pipeline import run_pipeline
 
-result = run_pipeline(["hdfc_march.pdf"], db_path="expenses.db")
-print(f"Added {result.new_inserted} expenses, skipped {result.duplicates_skipped} dupes")
+# run_pipeline returns a PipelineResult. For AGENT_NORMALIZATION mode it
+# produces a validation CSV and returns awaiting_validation=True.
+result = run_pipeline(["hdfc_march.pdf"])
+print("Validation CSV:", result.validation_csv)
+if result.awaiting_validation:
+    print("Please validate the CSV and then run the agent to apply categories.")
 ```
-
 ---
 
 ## Script Reference
@@ -70,9 +75,9 @@ All scripts live in `scripts/`. Run them directly or import as modules.
 | `parser.py` | PDF + CSV → RawTransaction | `parse_statement(filepath)` |
 | `pii_filter.py` | Mask PII in descriptions | `filter_batch(transactions)` |
 | `normalizer.py` | LLM → merchant/category/tags | `normalize_batch(transactions)` |
-| `deduplicator.py` | Hash-based dedup + SQLite | `deduplicate_and_insert(txns, store)` |
-| `pipeline.py` | Orchestrates all 4 steps | `run_pipeline(files, db_path)` |
-| `api.py` | FastAPI upload endpoint | `POST /api/statements/upload` |
+| `deduplicator.py` | Hash-based dedup (in-memory) | `deduplicate_and_insert(txns, store)` |
+| `pipeline.py` | Orchestrates parsing → validation → normalization → dedup → final CSV | `run_pipeline(files)` |
+| `api.py` | CLI wrapper for convenience (calls pipeline) | `python scripts/api.py` |
 
 ---
 
@@ -96,8 +101,8 @@ See `references/llm-backends.md` for setup instructions and drop-in code for eac
 ### Step 1 — Adapt the data model
 The pipeline uses `RawTransaction`, `CleanTransaction`, and `NormalizedTransaction` dataclasses. Replace these with your ORM models by editing the return types in `parser.py` and `pii_filter.py`.
 
-### Step 2 — Swap the DB layer
-`deduplicator.py` uses SQLite via `DeduplicationStore`. Replace `exists()` and `insert()` with calls to your ORM. Keep `make_hash()` and `is_fuzzy_duplicate()` unchanged.
+### Step 2 — (No DB) Deduplication
+This skill uses an in-memory deduplication store by default and does not insert records into any database. If you need persistent storage later, replace or extend `deduplicator.py` with a DB-backed store implementing `exists()` and `insert()`; keep `make_hash()` and `is_fuzzy_duplicate()` unchanged.
 
 ### Step 3 — Match your categories
 Edit the `CATEGORIES` string in `normalizer.py` to match your app's taxonomy exactly. The LLM will map to these labels.
