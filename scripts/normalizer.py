@@ -28,9 +28,14 @@ class NormalizedTransaction:
     balance:     Optional[float] = None
 
 
-# ── Customize these to match your app's categories ───────────────────────────
-
-CATEGORIES = """
+# ── Categories (move to scripts/constants.py to centralize) ────────────────
+# Attempt to import CATEGORIES from scripts.constants so the agent can manage
+# the canonical category list separately. If the constants module is missing,
+# fall back to the embedded default so the code remains usable.
+try:
+    from scripts.constants import CATEGORIES  # user will create/edit this file
+except Exception:
+    CATEGORIES = """
 - Food & Dining (subcategories: Restaurants, Food Delivery, Groceries, Cafes)
 - Transport (subcategories: Cab, Metro/Bus, Fuel, Auto)
 - Shopping (subcategories: Clothing, Electronics, Amazon/Flipkart, General)
@@ -44,6 +49,13 @@ CATEGORIES = """
 - Transfer (subcategories: UPI Transfer, NEFT, Internal Transfer)
 - Other
 """
+
+# The normalizer supports an "agent" backend. When LLM_BACKEND=agent, the
+# normalizer will export a normalization payload (prompt + transactions) to a
+# JSON file for an external agent to process (the agent can call a chosen
+# LLM or perform human-in-the-loop categorization). Use the helper
+# `apply_classifications` to convert the agent's JSON output into
+# NormalizedTransaction objects.
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
 
@@ -141,6 +153,20 @@ BACKENDS = {
 
 def call_llm(prompt: str) -> str:
     backend = os.getenv("LLM_BACKEND", "ollama").lower()
+    # Special "agent" backend: export payload and let an external agent handle it.
+    if backend == "agent":
+        # write payload to a timestamped file for the agent to pick up
+        import json, datetime, os
+        ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        out_dir = os.getenv("NORMALIZER_PAYLOAD_DIR", "./tmp")
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, f"normalizer_payload_{ts}.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"prompt": prompt}, fh, ensure_ascii=False, indent=2)
+        print(f"[NORM] Exported normalization payload for agent at: {path}")
+        # Signal to caller that agent handling is required by raising a specific error
+        raise RuntimeError(f"AGENT_HANDLED_NORMALIZATION: payload written to {path}")
+
     fn = BACKENDS.get(backend)
     if not fn:
         raise ValueError(f"Unknown LLM_BACKEND '{backend}'. Choose: {list(BACKENDS)}")
@@ -154,6 +180,16 @@ def normalize_batch(
     batch_size:   int = 30,
     retries:      int = 2,
 ) -> list[NormalizedTransaction]:
+    """Normalize a batch of CleanTransaction objects.
+
+    Behavior:
+    - If LLM_BACKEND is set to 'agent', the function will export a payload
+      file and raise RuntimeError("AGENT_HANDLED_NORMALIZATION: ...").
+      The external agent should process the payload and then call
+      `apply_classifications` with the agent's JSON output to obtain
+      NormalizedTransaction objects.
+    - Otherwise, it will call the configured LLM backend as before.
+    """
     results = []
 
     for start in range(0, len(transactions), batch_size):
@@ -164,7 +200,7 @@ def normalize_batch(
             try:
                 raw  = call_llm(prompt).strip()
                 raw  = raw.replace("```json", "").replace("```", "").strip()
-                # Some models wrap in {"transactions": [...]}
+                # Some models wrap in {"transactions": [...]} 
                 parsed = json.loads(raw)
                 if isinstance(parsed, dict):
                     parsed = next(iter(parsed.values()))
@@ -187,6 +223,11 @@ def normalize_batch(
                     ))
                 break
 
+            except RuntimeError as re:
+                # Special agent-handled case: bubble up so caller can stop and
+                # let agent / human-in-the-loop handle categorization.
+                raise
+
             except Exception as e:
                 print(f"[WARN] Batch {start} attempt {attempt+1} failed: {e}")
                 if attempt == retries - 1:
@@ -201,4 +242,53 @@ def normalize_batch(
                     time.sleep(1)
 
     print(f"[NORM] {len(results)} transactions normalized via {os.getenv('LLM_BACKEND','ollama')}")
+    return results
+
+
+# ── Helpers for agent-driven normalization ───────────────────────────────────
+
+def export_normalization_payload(transactions: list[CleanTransaction], out_path: str | None = None) -> str:
+    """Write a JSON payload containing the prompt and transactions for an
+    external agent to process. Returns the path to the payload file."""
+    import json, datetime, os
+    ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    out_dir = os.getenv("NORMALIZER_PAYLOAD_DIR", "./tmp")
+    os.makedirs(out_dir, exist_ok=True)
+    path = out_path or os.path.join(out_dir, f"normalizer_payload_{ts}.json")
+
+    prompt = build_prompt(transactions)
+    txn_flat = [t.__dict__ for t in transactions]
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"prompt": prompt, "transactions": txn_flat}, fh, ensure_ascii=False, indent=2)
+
+    print(f"[NORM] normalization payload exported to: {path}")
+    return path
+
+
+def apply_classifications(classifications: list[dict], transactions: list[CleanTransaction]) -> list[NormalizedTransaction]:
+    """Apply a list of classification dicts (from an agent / LLM) to the
+    original transactions and return NormalizedTransaction objects.
+
+    The expected `classifications` format is a list of objects like:
+    { "index": 1, "merchant": "...", "category": "...", "subcategory": "...", "tags": [...], "confidence": 0.95 }
+    """
+    results: list[NormalizedTransaction] = []
+    for item in classifications:
+        idx = item.get("index", 0) - 1
+        if idx < 0 or idx >= len(transactions):
+            continue
+        orig = transactions[idx]
+        results.append(NormalizedTransaction(
+            date        = orig.date,
+            description = orig.description,
+            merchant    = item.get("merchant", "Unknown"),
+            category    = item.get("category", "Other"),
+            subcategory = item.get("subcategory", ""),
+            amount      = orig.amount,
+            txn_type    = orig.txn_type,
+            bank        = orig.bank,
+            tags        = item.get("tags", []),
+            confidence  = item.get("confidence", 0.0),
+            balance     = orig.balance,
+        ))
     return results

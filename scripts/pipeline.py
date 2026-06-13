@@ -25,6 +25,10 @@ class PipelineResult:
     duplicates_skipped: int = 0
     errors:             list[str] = field(default_factory=list)
     elapsed_seconds:    float = 0.0
+    # Path to the validation CSV produced after PII filtering (if any)
+    validation_csv:     str | None = None
+    # True if the pipeline paused awaiting user/agent validation before categorization
+    awaiting_validation: bool = False
 
 
 def run_pipeline(
@@ -58,6 +62,40 @@ def run_pipeline(
     clean = [c for c in filter_batch(all_raw) if c.amount > 0]
     result.after_pii_filter = len(clean)
     print(f"  {result.after_pii_filter} transactions after filter")
+
+    # Produce a CSV for user validation (user inspects/edits categories before
+    # the agent proceeds with categorization). The CSV contains the cleaned
+    # transactions (no PII) for review.
+    import csv, datetime, os
+    ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    out_dir = os.getenv("VALIDATION_DIR", "./outputs")
+    os.makedirs(out_dir, exist_ok=True)
+    validation_path = os.path.join(out_dir, f"validation_{ts}.csv")
+    with open(validation_path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["date", "description", "amount", "txn_type", "bank", "balance"])
+        writer.writeheader()
+        for t in clean:
+            writer.writerow({
+                "date": t.date,
+                "description": t.description,
+                "amount": t.amount,
+                "txn_type": t.txn_type,
+                "bank": t.bank,
+                "balance": getattr(t, "balance", ""),
+            })
+
+    result.validation_csv = validation_path
+    print(f"\n[PIPELINE] Validation CSV written to: {validation_path}")
+
+    # If AGENT_NORMALIZATION is true, pause here and let the agent/human
+    # validate the CSV and then call the normalizer via the agent.
+    agent_mode = os.getenv("AGENT_NORMALIZATION", "false").lower() == "true"
+    if agent_mode:
+        result.awaiting_validation = True
+        print("[PIPELINE] AGENT_NORMALIZATION enabled — pausing after PII filter.\n"\
+              "Please validate the CSV and then run the agent to apply categories.")
+        result.elapsed_seconds = round(time.time() - t0, 2)
+        return result
 
     # Step 3: Normalize
     print("\n── 3/4 Normalizing ──")
