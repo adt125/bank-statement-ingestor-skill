@@ -13,7 +13,7 @@ from pathlib import Path
 from scripts.parser       import parse_statement
 from scripts.pii_filter   import filter_batch
 from scripts.normalizer   import normalize_batch
-from scripts.deduplicator import DeduplicationStore, deduplicate_and_insert
+from scripts.deduplicator import DeduplicationStore, InMemoryDeduplicationStore, deduplicate_and_insert
 
 
 @dataclass
@@ -38,7 +38,12 @@ def run_pipeline(
 ) -> PipelineResult:
     result = PipelineResult()
     t0     = time.time()
-    store  = DeduplicationStore(db_path) if not dry_run else None
+    # Use in-memory dedup store by default unless USE_DB=true is set.
+    use_db = os.getenv("USE_DB", "false").lower() == "true"
+    if not dry_run and use_db:
+        store = DeduplicationStore(db_path)
+    else:
+        store = InMemoryDeduplicationStore()
 
     # Step 1: Parse
     print("\n── 1/4 Parsing ──")

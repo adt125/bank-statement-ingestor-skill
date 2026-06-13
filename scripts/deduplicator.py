@@ -55,8 +55,9 @@ def is_fuzzy_duplicate(
 
 class DeduplicationStore:
     """
-    Lightweight SQLite store that tracks which transaction hashes
-    have already been added. Swap this out for your actual DB.
+    SQLite-backed dedup store retained for optional use. If you don't want
+    a DB, set USE_DB environment variable to "false" (default) and the
+    pipeline will use the in-memory store instead.
     """
 
     def __init__(self, db_path: str = "expenses.db"):
@@ -115,6 +116,30 @@ class DeduplicationStore:
 
     def close(self):
         self.conn.close()
+
+
+class InMemoryDeduplicationStore:
+    """Simple in-memory dedup store that tracks hashes for the current run.
+
+    This avoids any dependency on SQLite or external DBs. It's ephemeral and
+    does not persist between runs.
+    """
+
+    def __init__(self):
+        self.hashes = set()
+
+    def exists(self, txn_hash: str) -> bool:
+        return txn_hash in self.hashes
+
+    def insert(self, txn: NormalizedTransaction, txn_hash: str):
+        self.hashes.add(txn_hash)
+
+    def get_recent(self, days: int = 7) -> list[dict]:
+        # Not supported for in-memory store
+        return []
+
+    def close(self):
+        self.hashes.clear()
 
 
 # ─── Main dedup function ──────────────────────────────────────────────────────
