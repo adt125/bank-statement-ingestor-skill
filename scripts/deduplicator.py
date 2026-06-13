@@ -4,10 +4,8 @@ Hash-based dedup against both the incoming batch and your existing DB.
 """
 
 import hashlib
-import sqlite3
 import json
 from datetime import datetime, timedelta
-from dataclasses import asdict
 from scripts.normalizer import NormalizedTransaction   # adjust import path
 
 
@@ -53,69 +51,12 @@ def is_fuzzy_duplicate(
 
 # ─── SQLite-backed dedup store ────────────────────────────────────────────────
 
-class DeduplicationStore:
-    """
-    SQLite-backed dedup store retained for optional use. If you don't want
-    a DB, set USE_DB environment variable to "false" (default) and the
-    pipeline will use the in-memory store instead.
-    """
+# The SQLite-backed DeduplicationStore was removed to eliminate a hard
+# dependency on sqlite. The project now uses an in-memory store only.
+# If persistent storage is needed in the future, reintroduce a DB-backed
+# store in a separate module.
 
-    def __init__(self, db_path: str = "expenses.db"):
-        self.conn = sqlite3.connect(db_path)
-        self._init_db()
-
-    def _init_db(self):
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                hash        TEXT UNIQUE NOT NULL,
-                date        TEXT,
-                merchant    TEXT,
-                category    TEXT,
-                subcategory TEXT,
-                amount      REAL,
-                txn_type    TEXT,
-                bank        TEXT,
-                description TEXT,
-                tags        TEXT,
-                confidence  REAL,
-                balance     REAL,
-                created_at  TEXT DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_hash ON transactions(hash);
-        """)
-        self.conn.commit()
-
-    def exists(self, txn_hash: str) -> bool:
-        row = self.conn.execute(
-            "SELECT 1 FROM transactions WHERE hash = ?", (txn_hash,)
-        ).fetchone()
-        return row is not None
-
-    def insert(self, txn: NormalizedTransaction, txn_hash: str):
-        self.conn.execute("""
-            INSERT OR IGNORE INTO transactions
-            (hash, date, merchant, category, subcategory, amount, txn_type, bank, description, tags, confidence, balance)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            txn_hash, txn.date, txn.merchant, txn.category,
-            txn.subcategory, txn.amount, txn.txn_type, txn.bank,
-            txn.description, json.dumps(txn.tags), txn.confidence, txn.balance,
-        ))
-        self.conn.commit()
-
-    def get_recent(self, days: int = 7) -> list[dict]:
-        cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        rows = self.conn.execute(
-            "SELECT * FROM transactions WHERE date >= ?", (cutoff,)
-        ).fetchall()
-        cols = [d[0] for d in self.conn.execute("PRAGMA table_info(transactions)").fetchall()]
-        return [dict(zip(cols, row)) for row in rows]
-
-    def close(self):
-        self.conn.close()
+# (No persistent store in this file.)
 
 
 class InMemoryDeduplicationStore:
@@ -146,7 +87,7 @@ class InMemoryDeduplicationStore:
 
 def deduplicate_and_insert(
     transactions: list[NormalizedTransaction],
-    store: DeduplicationStore,
+    store,
 ) -> tuple[list[NormalizedTransaction], list[NormalizedTransaction]]:
     """
     Returns (new_transactions, duplicate_transactions).
@@ -182,7 +123,7 @@ def deduplicate_and_insert(
 if __name__ == "__main__":
     from scripts.normalizer import NormalizedTransaction
 
-    store = DeduplicationStore("demo_expenses.db")
+    store = InMemoryDeduplicationStore()
 
     batch1 = [
         NormalizedTransaction("2024-03-15", "SWIGGY ORDER", "Swiggy", "Food & Dining", "Food Delivery", 320.0, "debit", "hdfc", ["food"], 0.99),
