@@ -19,16 +19,22 @@ Consolidated CSV with columns:
 - `description` - Transaction details
 - `amount` - Transaction amount
 - `type` - Credit or Debit
-- `source` - Account name/number
-- `tag` - Bank/account type (sbi, hdfc, cc)
+- `source` - Bank/account type (hdfc, sbi, cc)
+- `tag` - Blank user-editable tag/category
 
 **Transactions are sorted by bank/tag (HDFC, SBI, CC) and then by date within each group.**
 
 ## Usage
 
 ```bash
-# Process statements from samples folder
-python src/main.py -i samples -o consolidated_statements.csv
+# One-command flow: read hdfc/, sbi/, cc/, consolidate, and push to Sheets
+python run_ingest.py
+
+# Dry/local flow: only create consolidated_statements.csv
+python run_ingest.py --no-sheets
+
+# Process statements from bank-specific folders
+python src/main.py -i . -o consolidated_statements.csv
 
 # Process single file
 python src/main.py -f statement.xlsx -t sbi -o output.csv
@@ -37,10 +43,10 @@ python src/main.py -f statement.xlsx -t sbi -o output.csv
 python src/main.py -f statement.xlsx -t sbi -s "AccountXXXX" -o output.csv
 
 # Push consolidated rows to Google Sheets after CSV export
-python src/main.py -i samples -o consolidated_statements.csv --push-to-sheets
+python src/main.py -i . -o consolidated_statements.csv --push-to-sheets
 
 # Replace monthly tab contents instead of appending
-python src/main.py -i samples -o consolidated_statements.csv --push-to-sheets --sheets-replace
+python src/main.py -i . -o consolidated_statements.csv --push-to-sheets --sheets-replace
 ```
 
 ## Google Sheets Export
@@ -77,7 +83,7 @@ https://docs.google.com/spreadsheets/d/<spreadsheet-id>/edit
 CLI overrides are also available:
 
 ```bash
-python src/main.py -i samples --push-to-sheets \
+python src/main.py -i . --push-to-sheets \
   --service-account-file google-service-account.json \
   --sheet-id your-google-sheet-id \
   --sheets-range A:F \
@@ -86,20 +92,34 @@ python src/main.py -i samples --push-to-sheets \
 
 ## Sample Statements
 
-Place your bank statement files in the `samples/` folder. The system auto-detects bank type from filenames:
+Place your bank statement files in bank-specific folders:
+
+```
+hdfc/
+└── statement_june.xls
+sbi/
+└── statement_june.xlsx
+cc/
+└── statement_june.pdf
+```
+
+Then run:
+
+```bash
+python run_ingest.py
+```
+
+`run_ingest.py` uses replace mode for Google Sheets by default, which makes
+reruns safer because it avoids appending duplicate rows. Use `--append` only
+when you intentionally want to keep existing rows and add new ones.
+
+Folder names take priority, so files inside `hdfc/`, `sbi/`, or `cc/` can have
+generic names. Files directly inside another input folder still use filename
+detection as a fallback:
 
 - **SBI**: `sbi_*.xlsx`, `sbi_*.xls` → tag: `sbi`
 - **HDFC**: `hdfc_*.xlsx`, `hdfc_*.xls` → tag: `hdfc`
 - **Credit Card**: `*cc*.pdf`, `*creditcard*.pdf` → tag: `cc`
-
-Example:
-
-```
-samples/
-├── sbi_statement_may.xlsx
-├── hdfc_account_may.xlsx
-└── hdfc_cc_statement.pdf
-```
 
 ## Project Structure
 
@@ -115,7 +135,10 @@ bank-statement-ingestor/
 │   │   ├── hdfc_parser.py   # HDFC statement parser (Excel)
 │   │   └── cc_parser.py     # Credit card parser (PDF)
 │   └── __init__.py
-├── samples/                 # Place your statements here
+├── hdfc/                    # HDFC statements
+├── sbi/                     # SBI statements
+├── cc/                      # Credit card statements
+├── samples/                 # Legacy sample statements
 ├── requirements.txt         # Python dependencies
 └── README.md
 ```

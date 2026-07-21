@@ -8,6 +8,8 @@ from parsers import SBIParser, HDFCParser, CreditCardParser, Transaction
 class StatementConsolidator:
     """Consolidate transactions from multiple bank statements"""
 
+    SUPPORTED_EXTENSIONS = {".xlsx", ".xls", ".pdf"}
+
     # Mapping of file patterns to parser classes and tags
     PARSER_CONFIG = {
         "sbi": {
@@ -61,30 +63,72 @@ class StatementConsolidator:
         """
         Auto-detect and parse all statement files in a directory
 
-        Files should be named with bank identifier (e.g., SBI_statement.xlsx, HDFC_Jan.xls, cc_statement.pdf)
-        File extension takes priority: .pdf = CC, .xlsx/.xls = SBI/HDFC
+        Preferred layout:
+          directory/
+            hdfc/
+            sbi/
+            cc/
+
+        Files in those folders are routed by folder name. Files directly under
+        the input directory still use filename-based detection as a fallback.
         """
         if not os.path.isdir(directory):
             print(f"Directory not found: {directory}")
             return
 
-        files = Path(directory).glob("*")
+        input_path = Path(directory)
+        files = self._statement_files(input_path)
 
         for filepath in files:
             if not filepath.is_file():
                 continue
 
-            if filepath.suffix.lower() not in [".xlsx", ".xls", ".csv", ".pdf"]:
+            if filepath.suffix.lower() not in self.SUPPORTED_EXTENSIONS:
                 continue
 
-            # Try to detect tag from filename and extension
-            tag = self._detect_tag(filepath.name, filepath.suffix)
+            tag = self._detect_tag_from_path(filepath, input_path)
 
             if tag:
-                print(f"Detected {tag.upper()} statement: {filepath.name}")
+                print(f"Detected {tag.upper()} statement: {filepath}")
                 self.add_statement(str(filepath), tag)
             else:
                 print(f"Could not detect bank from filename: {filepath.name}")
+
+    def _statement_files(self, input_path: Path):
+        bank_dirs = [
+            input_path / tag
+            for tag in self.PARSER_CONFIG
+            if (input_path / tag).is_dir()
+        ]
+
+        if bank_dirs:
+            for filepath in sorted(input_path.iterdir()):
+                if filepath.is_file():
+                    yield filepath
+            for bank_dir in bank_dirs:
+                yield from sorted(bank_dir.rglob("*"))
+            return
+
+        yield from sorted(input_path.rglob("*"))
+
+    def _detect_tag_from_path(self, filepath: Path, input_path: Path) -> str:
+        """
+        Detect bank tag from folder first, then filename.
+
+        A folder named hdfc, sbi, or cc under the input directory wins over
+        filename heuristics, so generic filenames like statement.xls work.
+        """
+        try:
+            relative_path = filepath.relative_to(input_path)
+        except ValueError:
+            relative_path = filepath
+
+        folder_parts = [part.lower() for part in relative_path.parts[:-1]]
+        for part in folder_parts:
+            if part in self.PARSER_CONFIG:
+                return part
+
+        return self._detect_tag(filepath.name, filepath.suffix)
 
     def _detect_tag(self, filename: str, extension: str = None) -> str:
         """
@@ -108,7 +152,7 @@ class StatementConsolidator:
             return "cc"
 
         # For Excel files, only detect SBI or HDFC (not CC)
-        if extension_lower in [".xlsx", ".xls", ".csv"]:
+        if extension_lower in [".xlsx", ".xls"]:
             for tag, config in self.PARSER_CONFIG.items():
                 if tag == "cc":  # Skip CC for Excel files
                     continue
@@ -139,8 +183,8 @@ class StatementConsolidator:
                 "description": t.description,
                 "amount": t.amount,
                 "type": t.type,
-                "source": t.source,
-                "tag": t.tag,
+                "source": t.tag,
+                "tag": "",
             }
             for t in self.transactions
         ]
@@ -150,9 +194,9 @@ class StatementConsolidator:
         # Convert date to datetime
         df["date"] = pd.to_datetime(df["date"])
 
-        # Sort by tag (in order: hdfc, sbi, cc) and then by date
+        # Sort by source (in order: hdfc, sbi, cc) and then by date
         tag_order = {"hdfc": 0, "sbi": 1, "cc": 2}
-        df["tag_order"] = df["tag"].map(lambda x: tag_order.get(x, 3))
+        df["tag_order"] = df["source"].map(lambda x: tag_order.get(x, 3))
         df = (
             df.sort_values(["tag_order", "date"])
             .drop("tag_order", axis=1)

@@ -36,6 +36,12 @@ output/
 .env
 *.service-account.json
 google-service-account.json
+hdfc/*
+!hdfc/.gitkeep
+sbi/*
+!sbi/.gitkeep
+cc/*
+!cc/.gitkeep
 .DS_Store
 
 samples/
